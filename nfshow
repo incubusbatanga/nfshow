@@ -1,0 +1,533 @@
+#!/usr/bin/perl
+###########################################################################
+#
+# nfshow (NetFlow Viewer for nfacctd)
+#
+# Copyright (c) 2017 Marko Dinic <marko@yu.net>. All rights reserved.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Version: 0.1
+# Date:    July 4th 2017
+#
+###########################################################################
+
+my %CONFIG = (
+    'pmacct_cmd'	=> "/usr/local/bin/pmacct",
+    'stats'		=> {
+				'as-paths'	=> { 'desc' => "counters per AS path", 'pipe' => "/var/run/pmacct/as_paths.pipe", 'key' => [ 'as_path' ] },
+				'src-as'	=> { 'desc' => "counters per traffic source's AS", 'pipe' => "/var/run/pmacct/src_ases.pipe", 'key' => [ 'src_as' ] },
+				'dst-as'	=> { 'desc' => "counters per traffic destination's AS", 'pipe' => "/var/run/pmacct/dst_ases.pipe", 'key' => [ 'dst_as' ] },
+				'networks'	=> { 'desc' => "counters per source-destination network pair", 'pipe' => "/var/run/pmacct/net_to_net.pipe", 'key' => [ 'src_net', 'dst_net' ] },
+				'hosts'		=> { 'desc' => "counters per source-destination host pair", 'pipe' => "/var/run/pmacct/host_to_host.pipe", 'key' => [ 'src_ip', 'dst_ip' ] },
+				'src-ports'	=> { 'desc' => "counters per traffic's source port", 'pipe' => "/var/run/pmacct/src_ports.pipe", 'key' => [ 'src_port' ] },
+				'dst-ports'	=> { 'desc' => "counters per traffic's destination port", 'pipe' => "/var/run/pmacct/dst_ports.pipe", 'key' => [ 'dst_port' ] },
+				'protocols'	=> { 'desc' => "counters per protocol", 'pipe' => "/var/run/pmacct/protocols.pipe", 'key' => [ 'peer_src_ip' ] }
+			   },
+    'field_desc'	=> {
+				'peer_src_ip',	=> "NETFLOW EXPORTER",
+				'as_path'	=> "AS PATH",
+				'in_iface'	=> "INPUT INTERFACE",
+				'src_as'	=> "SOURCE AS",
+				'src_ip'	=> "SOURCE ADDRESS",
+				'src_net'	=> "SOURCE PREFIX",
+				'src_mask'	=> "SOURCE CIDR",
+				'src_port'	=> "SOURCE PORT",
+				'out_iface'	=> "OUTPUT INTERFACE",
+				'dst_as'	=> "DESTINATION AS",
+				'dst_ip'	=> "DESTINATION ADDRESS",
+				'dst_net'	=> "DESTINATION PREFIX",
+				'dst_mask'	=> "DESTINATION CIDR",
+				'dst_port'	=> "DESTINATION PORT"
+			   },
+    'field_width'	=> {
+				'peer_src_ip'	=> 40,
+				'as_path'	=> 80,
+				'in_iface'	=> 30,
+				'src_as'	=> 40,
+				'src_ip'	=> 40,
+				'src_net'	=> 40,
+				'src_mask'	=> 20,
+				'src_port'	=> 20,
+				'out_iface'	=> 30,
+				'dst_as'	=> 40,
+				'dst_ip'	=> 40,
+				'dst_net'	=> 40,
+				'dst_mask'	=> 20,
+				'dst_port'	=> 20,
+				'protocol'	=> 20,
+				'packets'	=> 20,
+				'bytes'		=> 20
+			   },
+    'field_order'	=> [
+				'peer_src_as',
+				'peer_src_ip',
+				'peer_dst_as',
+				'peer_dst_ip',
+				'as_path',
+				'in_iface',
+				'src_as',
+				'src_ip',
+				'src_net',
+				'src_mask',
+				'src_port',
+				'out_iface',
+				'dst_as',
+				'dst_ip',
+				'dst_net',
+				'dst_mask',
+				'dst_port',
+				'protocol',
+				'packets',
+				'bytes'
+			   ],
+
+);
+
+###########################################################################
+
+use strict;
+use warnings;
+
+###########################################################################
+
+use Getopt::Std;
+use Socket qw(AF_INET AF_INET6);
+use Socket6;
+use Data::Dumper;
+
+###########################################################################
+
+our %atoh = ();
+our %htoa = ();
+our %asn = ();
+
+###########################################################################
+
+sub is_ipv4($)
+{
+    return (defined($_[0]) && $_[0] =~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:\/\d{1,2})?$/) ? 1:0;
+}
+
+sub is_ipv6($)
+{
+    return (defined($_[0]) && $_[0] =~ /^((?=.*(::))(?!.*\2.+\2))\2?|([\dA-F]{1,4}(::|:\b|$)|\1)(?3){7}$/i);
+}
+
+sub is_ip($)
+{
+    return (is_ipv4($_[0]) || is_ipv6($_[0])) ? 1:0;
+}
+
+sub is_num($)
+{
+    return (defined($_[0]) && $_[0] =~ /^[\+\-]?\d+(\.\d+)?$/) ? 1:0;
+}
+
+sub htoa($)
+{
+    my $hostname = shift;
+
+    return undef unless defined($hostname) && $hostname ne '';
+    return $hostname if is_ip($hostname);
+
+    $hostname = lc($hostname);
+
+    my $cached_ip = $htoa{$hostname};
+    return $cached_ip if defined($cached_ip) && $cached_ip ne '';
+
+    my ($af, $socktype, $proto, $saddr, $canonname);
+    my @info = getaddrinfo($hostname, 0);
+    while(scalar(@info) >= 5) {
+	($af, $socktype, $proto, $saddr, $canonname, @info) = @info;
+	my ($ip, $port) = getnameinfo($saddr, NI_NUMERICHOST|NI_NUMERICSERV);
+	if(is_ip($ip)) {
+	    $htoa{$hostname} = $ip;
+	    return $ip;
+	}
+    }
+
+    return undef;
+}
+
+sub atoh($)
+{
+    my $address = shift;
+
+    return undef unless defined($address) && $address ne '';
+    return $address unless is_ip($address);
+
+    $address = lc($address);
+
+    my $cached_hostname = $atoh{$address};
+    return $cached_hostname if defined($cached_hostname) && $cached_hostname ne '';
+
+    my $hostname;
+
+    my $af = is_ipv6($address) ? AF_INET6:AF_INET;
+    my $saddr = inet_pton($af, $address);
+
+    if(defined($saddr)) {
+	($hostname) = gethostbyaddr($saddr, $af);
+	$hostname = $address unless(defined($hostname) && $hostname ne "");
+    }
+
+    $atoh{$address} = $hostname;
+
+    return $hostname;
+}
+
+sub asn($)
+{
+    my $as = shift;
+
+    return undef unless defined($as) && $as ne '';
+    return $as unless $as =~ /^\d+$/;
+
+    return "LOCAL" if $as eq '0';
+
+    my $cached_as_name = $asn{$as};
+    return $cached_as_name if defined($cached_as_name) && $cached_as_name ne '';
+
+    my ($as_name) = `whois AS$as | grep as-name` =~ /as\-name:\s+([^\s\n\r]+)/;
+
+    $as_name = 'AS'.$as unless defined($as_name) && $as_name ne '';
+
+    $asn{$as} = $as_name;
+
+    return $as_name;
+}
+
+###########################################################################
+
+sub usage()
+{
+    my ($basename) = ($0 =~ /\/?([^\/]+)$/);
+    print "Usage: ".$basename." [options] <statistics_type>\n\n";
+
+    print "Available options:\n\n";
+
+    print "  --version           displays version information\n";
+    print "  --help              displays this help message\n\n";
+
+    print "  -x <host>           hostname or IP address of the NetFlow exporter\n\n";
+
+    print "  -a                  aggregate counters (default: per-protocol counters)\n";
+    print "  -z                  zero counters (default: keep counters)\n\n";
+
+    print "  -b                  sort by bytes\n";
+    print "  -p                  sort by packets\n";
+    print "  -r                  sort in reverse order\n\n";
+
+    print "  -l <N>              output N lines (default: output all)\n";
+    print "  -n                  output numeric (default: resolve IPs)\n";
+    print "  -c                  output in CSV format (default: table format)\n\n";
+
+    print "Statistics types:\n\n";
+
+    foreach my $stat (sort keys %{$CONFIG{'stats'}}) {
+	printf("  %-20s%s\n", $stat, $CONFIG{'stats'}{$stat}{'desc'});
+    }
+    print "\n";
+}
+
+sub VERSION_MESSAGE()
+{
+    my $date;
+    my $ver;
+    my $fh;
+
+    my $release = "";
+
+    if(open($fh, $0)) {
+        for(my $i = 0; ($i < 20) && !(defined($ver) && defined($date)); $i++) {
+            my $line = <$fh>;
+            if($line =~ /version:\s+(\d+\.\d+)/i) {
+                $ver = $1;
+            } elsif ($line =~ /date:\s+((?:[a-z]{3}\s+\d{1,2}(?:[a-z]{2})?|\d{1,2}(?:[a-z]{2})?\s+[a-z]{3}|\d{1,2}[\.\s]\d{1,2}\.?)\s+\d{4})/i) {
+                $date = $1;
+            }
+        }
+        close($fh);
+        if(defined($ver) && $ver ne "") {
+            # Format version string
+            $release .= " v".$ver;
+        }
+        if(defined($date) && $date ne "") {
+            # Format release string
+            $release .= " [release ".$date."]";
+        }
+    }
+
+    print "NetFlow Viewer for nfacctd".$release."\n\n";
+    usage();
+    exit(1);
+}
+
+###########################################################################
+
+my %OPTS = ();
+
+getopts('abprzcnx:l:', \%OPTS);
+
+my $aggregate = $OPTS{'a'} ? 1:0;
+
+my $sort;
+
+if($OPTS{'p'}) {
+    $sort = 'packets';
+} elsif($OPTS{'b'}) {
+    $sort = 'bytes';
+}
+
+my $reverse = $OPTS{'r'} ? 1:0;
+my $resolve = $OPTS{'n'} ? 0:1;
+my $csv = $OPTS{'c'} ? 1:0;
+
+my $lines;
+
+if(defined($OPTS{'l'})) {
+    unless($OPTS{'l'} =~ /^\d+$/) {
+	usage();
+	exit(1);
+    }
+    $lines = int($OPTS{'l'});
+}
+
+my $exporter;
+
+if(defined($OPTS{'x'}) && $OPTS{'x'} ne '') {
+
+    my $address = htoa($OPTS{'x'});
+    die "Couldn't resolve exporter ".$OPTS{'x'}."\n" unless is_ip($address);
+    $exporter = lc($address);
+
+    print "Showing only exports from ".atoh($exporter)."\n\n";
+}
+
+my $stat_type = shift @ARGV;
+
+unless(defined($stat_type) && $stat_type ne '' &&
+       defined($CONFIG{'stats'}{$stat_type}) &&
+       ref($CONFIG{'stats'}{$stat_type}) eq 'HASH') {
+    usage();
+    exit(1);
+}
+
+# Full path to the pmacct IMT pipe
+my $pipe = $CONFIG{'stats'}{$stat_type}{'pipe'};
+
+unless(defined($pipe) && $pipe ne '') {
+    usage();
+    exit(1);
+}
+
+# pmacct "pipe" must be UNIX socket
+unless(-S $pipe) {
+    die "Cannot access ".$stat_type." statistics: ".$pipe." doesn't appear to be a valid UNIX socket\n";
+}
+
+# Format pmacct command line
+my $cmd = $CONFIG{'pmacct_cmd'}." -p ".$pipe." -l ".(defined($exporter) ? "-c peer_src_ip -M ".$exporter:"-s").($OPTS{'z'} ? " -e":"");
+
+# Grab pmacct output
+my @rows = `$cmd`;
+unless(scalar(@rows) > 3) {
+    print "No ".$stat_type." statistics found\n";
+    exit(0);
+}
+
+# Discard footer
+pop @rows;
+
+# Get header
+my @fields = split(/\s+/, lc(shift @rows));
+
+my %exporters = ();
+my %records = ();
+my $key = 0;
+
+foreach my $row (@rows) {
+    # Get rid of trailing newline
+    chop($row);
+    # Split data row into field values
+    my @values = split(/\s+/, $row);
+    # Skip rows that dont have packets, bytes
+    # and at least one metric field
+    next unless scalar(@values) > 2;
+
+    my %record = ();
+
+    # Pack fields into hash for easy lookup
+    @record{@fields} = @values;
+
+    # If specific NF exporter was requested,
+    # skip records produced by other exporters
+    # in case pmacct command didn't filter out
+    # other exporters
+    next if(defined($exporter) && $exporter !~ /^$record{'peer_src_ip'}$/i);
+
+
+    # Which data fields identify aggregated records as unique ?
+    my $unique_key_fields =  $CONFIG{'stats'}{$stat_type}{'key'};
+
+    # If aggregate counters are requested and unique key fields are specified ...
+    if($aggregate && ref($unique_key_fields) eq 'ARRAY' && scalar(@{$unique_key_fields}) > 0) {
+	# ... format the aggregation key that uniquely identifies the aggregation bucket
+	my $aggregation_key = join('|', @record{@{$unique_key_fields}});
+	if(defined($aggregation_key) && $aggregation_key ne '') {
+	    # Since we are aggregating protocol counters,
+	    # we can designate aggregate protocol as 'ip'
+	    $record{'protocol'} = 'ip';
+	    # Use aggregation bucket key as unique record key
+	    $key = $aggregation_key;
+	}
+    }
+
+    # If using aggregate counters, one or more records
+    # can have the same unique key ...
+    if(defined($records{$key}) && ref($records{$key}) eq 'HASH') {
+	# ... Therefore, we will aggregate them all
+	# into a single, aggregate record
+	$records{$key}{'bytes'} += $record{'bytes'};
+	$records{$key}{'packets'} += $record{'packets'};
+    # If using per-protocol counters or using aggregate
+    # counters, but this aggregate record doesn't exist
+    } else {
+	# ... simply add the record
+	$records{$key++} = \%record;
+    }
+}
+
+# Do we have any records to display now ?
+unless(scalar(keys %records)) {
+    print "No ".$stat_type." statistics found\n";
+    exit(0);
+}
+
+# Sort record indexes either by packets, bytes or order in which they were collected
+my @indexes = defined($sort) ?
+		    sort {
+			    my $A = $records{$a}{$sort};
+			    my $B = $records{$b}{$sort};
+
+			    return (is_num($A) && is_num($B)) ? ($A <=> $B):($A cmp $B);
+
+		    } keys %records
+
+		    :
+
+		    sort {
+
+			    return (is_num($a) && is_num($b)) ? ($a <=> $b):($a cmp $b);
+
+		    } keys %records;
+
+# We want record fields to be presented in certain order
+my @order = ();
+
+# Not all fields exist in every pmacct line,
+# but those that do, must preserve given order
+foreach my $field (@{$CONFIG{'field_order'}}) {
+    # We will filter out non-existant fields
+    # by using the first record in the list,
+    # assumming all records contain the exact
+    # same fields
+    next unless(defined($records{$indexes[0]}{$field}));
+    push @order, $field;
+}
+
+my $num_fields = scalar(@order);
+my $total_width = 0;
+
+# Print header ...
+print uc($csv ?
+
+	    # ... either in simple CSV format
+	    join(',', @order)
+
+	    :
+
+	    # ... or as a formatted table header
+	    sprintf(join('',
+			 (map {
+				    # Width is either specified per-column
+				    # or default is assumed, depending on
+				    # whether addresses are numeric or not
+				    my $width = defined($CONFIG{'field_width'}{$_}) ?
+						    $CONFIG{'field_width'}{$_}:($OPTS{'n'} ? 20:30);
+				    # Track the total width of the table
+				    $total_width += $width+2;
+				    # This is our dynamic column format
+				    "%-".($width+2).".".$width."s";
+			  } @order)
+		    ),
+		    (map { defined($CONFIG{'field_desc'}{$_}) ? $CONFIG{'field_desc'}{$_}:$_ } @order))
+
+	)."\n".("=" x $total_width)."\n";
+
+for(my $n = (defined($lines) && $lines < scalar(@indexes)) ? $lines:scalar(@indexes); $n > 0; $n--) {
+
+    # Get record indexes from the sorted list
+    # in either  ascending or descending order
+    my $index = $reverse ? pop @indexes:shift @indexes;
+    # Get the record itself
+    my $record = $records{$index};
+
+    # Resolve IP addresses, unless -n argument is given
+    unless($OPTS{'n'}) {
+	if(defined($record->{'peer_src_ip'}) && $record->{'peer_src_ip'} ne '') {
+	    $record->{'peer_src_ip'} = atoh($record->{'peer_src_ip'});
+	}
+	if(defined($record->{'src_ip'}) && $record->{'src_ip'} ne '') {
+	    $record->{'src_ip'} = atoh($record->{'src_ip'});
+	}
+	if(defined($record->{'dst_ip'}) && $record->{'dst_ip'} ne '') {
+	    $record->{'dst_ip'} = atoh($record->{'dst_ip'});
+	}
+	if(defined($record->{'src_as'}) && $record->{'src_as'} ne '') {
+	    $record->{'src_as'} = sprintf("%-10.10s[ %.20s ]", $record->{'src_as'}, asn($record->{'src_as'}));
+	}
+	if(defined($record->{'dst_as'}) && $record->{'dst_as'} ne '') {
+	    $record->{'dst_as'} = sprintf("%-10.10s[ %.20s ]", $record->{'dst_as'}, asn($record->{'dst_as'}));
+	}
+    }
+
+    # Print data row ...
+    printf(($csv ?
+
+	      # ... either in simple CSV format
+	      join(',', @{$record}{@order})
+
+	      :
+
+	      # ... or as a formatted table row
+	      sprintf(join('',
+			   (map {
+				    # Width is either specified per-column
+				    # or default is assumed, depending on
+				    # whether addresses are numeric or not
+				    my $width = defined($CONFIG{'field_width'}{$_}) ?
+						    $CONFIG{'field_width'}{$_}:($OPTS{'n'} ? 20:30);
+				    # This is our dynamic column format
+				    "%-".($width+2).".".$width."s";
+			   } @order)
+		      ),
+		      @{$record}{@order})
+
+	   )."\n");
+
+}
+
+exit(0);
