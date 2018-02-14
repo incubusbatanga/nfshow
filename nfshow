@@ -18,8 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Version: 0.2
-# Date:    Feb 14th 2018
+# Version: 0.3
+# Date:    Feb 15th 2018
 #
 ###########################################################################
 
@@ -194,6 +194,30 @@ sub atoh($)
     return $hostname;
 }
 
+sub shorten($)
+{
+    my $value = shift;
+
+    my @units;
+    my $unit;
+
+    if($value >= 1) {
+
+	@units = ('','K','M','G','T','P','E');
+
+	for(my $v = $value; $v >= 1; $value = $v, $unit = shift @units, $v /= 1000) {}
+
+    } else {
+
+	@units = ('m','u','n','p','f','a');
+
+	for(my $v = $value; $v <= 1; $v *= 1000, $unit = shift @units, $value = $v) {}
+
+    }
+
+    return sprintf("%02.2f%s", $value, $unit);
+}
+
 sub asn($)
 {
     my $as = shift;
@@ -266,8 +290,9 @@ sub usage()
     print "  -p                  sort by packets\n";
     print "  -r                  sort in reverse order\n\n";
 
-    print "  -l <N>              output N lines (default: output all)\n";
-    print "  -n                  output numeric (default: resolve IPs)\n";
+    print "  -l <N>              limit to N rows (default: no limit)\n";
+    print "  -n                  display numeric (default: resolve data)\n";
+    print "  -s                  use short units (default: long units)\n";
     print "  -c                  output in CSV format (default: table format)\n\n";
 
     print "Statistics types:\n\n";
@@ -316,7 +341,7 @@ sub VERSION_MESSAGE()
 
 my %OPTS = ();
 
-getopts('abprzcnx:l:', \%OPTS);
+getopts('abprzcnsx:l:', \%OPTS);
 
 my $aggregate = $OPTS{'a'} ? 1:0;
 
@@ -330,6 +355,7 @@ if($OPTS{'p'}) {
 
 my $reverse = $OPTS{'r'} ? 1:0;
 my $resolve = $OPTS{'n'} ? 0:1;
+my $shorten = $OPTS{'s'} ? 1:0;
 my $csv = $OPTS{'c'} ? 1:0;
 
 my $lines;
@@ -482,6 +508,16 @@ for(my $n = (defined($lines) && $lines < scalar(@indexes)) ? $lines:scalar(@inde
     my $index = $reverse ? pop @indexes:shift @indexes;
     # Get the record itself
     my $record = $records{$index};
+
+    # Convert counters to short, human friendly unit format
+    if($shorten) {
+	if(defined($record->{'bytes'}) && $record->{'bytes'} ne '') {
+	    $record->{'bytes'} = shorten($record->{'bytes'});
+	}
+	if(defined($record->{'packets'}) && $record->{'packets'} ne '') {
+	    $record->{'packets'} = shorten($record->{'packets'});
+	}
+    }
 
     # Resolve field data, unless -n argument is given
     unless($OPTS{'n'}) {
