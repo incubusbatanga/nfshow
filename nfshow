@@ -3,7 +3,7 @@
 #
 # nfshow (NetFlow Viewer for nfacctd)
 #
-# Copyright (c) 2017 Marko Dinic <marko@yu.net>. All rights reserved.
+# Copyright (c) 2018 Marko Dinic. All rights reserved.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,15 +18,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Version: 0.1
-# Date:    July 4th 2017
+# Version: 0.2
+# Date:    Feb 14th 2018
 #
 ###########################################################################
 
 my %CONFIG = (
     'pmacct_cmd'	=> "/usr/local/bin/pmacct",
     'stats'		=> {
-				'as-paths'	=> { 'desc' => "counters per AS path", 'pipe' => "/var/run/pmacct/as_paths.pipe", 'key' => [ 'as_path' ] },
+				'src-as-paths'	=> { 'desc' => "counters per traffic source's AS path", 'pipe' => "/var/run/pmacct/src_as_paths.pipe", 'key' => [ 'src_as_path' ] },
+				'dst-as-paths'	=> { 'desc' => "counters per traffic destination's AS path", 'pipe' => "/var/run/pmacct/dst_as_paths.pipe", 'key' => [ 'as_path' ] },
 				'src-as'	=> { 'desc' => "counters per traffic source's AS", 'pipe' => "/var/run/pmacct/src_ases.pipe", 'key' => [ 'src_as' ] },
 				'dst-as'	=> { 'desc' => "counters per traffic destination's AS", 'pipe' => "/var/run/pmacct/dst_ases.pipe", 'key' => [ 'dst_as' ] },
 				'networks'	=> { 'desc' => "counters per source-destination network pair", 'pipe' => "/var/run/pmacct/net_to_net.pipe", 'key' => [ 'src_net', 'dst_net' ] },
@@ -37,7 +38,9 @@ my %CONFIG = (
 			   },
     'field_desc'	=> {
 				'peer_src_ip',	=> "NETFLOW EXPORTER",
-				'as_path'	=> "AS PATH",
+				'src_as_path'	=> "SOURCE AS PATH",
+				'as_path'	=> "DESTINATION AS PATH",
+				'whois'		=> "",
 				'in_iface'	=> "INPUT INTERFACE",
 				'src_as'	=> "SOURCE AS",
 				'src_ip'	=> "SOURCE ADDRESS",
@@ -52,29 +55,32 @@ my %CONFIG = (
 				'dst_port'	=> "DESTINATION PORT"
 			   },
     'field_width'	=> {
-				'peer_src_ip'	=> 40,
-				'as_path'	=> 80,
-				'in_iface'	=> 30,
-				'src_as'	=> 40,
-				'src_ip'	=> 40,
-				'src_net'	=> 40,
-				'src_mask'	=> 20,
-				'src_port'	=> 20,
-				'out_iface'	=> 30,
-				'dst_as'	=> 40,
-				'dst_ip'	=> 40,
-				'dst_net'	=> 40,
-				'dst_mask'	=> 20,
-				'dst_port'	=> 20,
-				'protocol'	=> 20,
-				'packets'	=> 20,
-				'bytes'		=> 20
+				'peer_src_ip'	=> 16,
+				'src_as_path'	=> 20,
+				'as_path'	=> 20,
+				'in_iface'	=> 20,
+				'src_as'	=> 14,
+				'src_ip'	=> 20,
+				'src_net'	=> 20,
+				'src_mask'	=> 16,
+				'src_port'	=> 16,
+				'out_iface'	=> 20,
+				'dst_as'	=> 14,
+				'dst_ip'	=> 20,
+				'dst_net'	=> 20,
+				'dst_mask'	=> 16,
+				'dst_port'	=> 16,
+				'whois'		=> 16,
+				'protocol'	=> 8,
+				'packets'	=> 10,
+				'bytes'		=> 10
 			   },
     'field_order'	=> [
 				'peer_src_as',
 				'peer_src_ip',
 				'peer_dst_as',
 				'peer_dst_ip',
+				'src_as_path',
 				'as_path',
 				'in_iface',
 				'src_as',
@@ -88,9 +94,10 @@ my %CONFIG = (
 				'dst_net',
 				'dst_mask',
 				'dst_port',
+				'whois',
 				'protocol',
 				'packets',
-				'bytes'
+				'bytes',
 			   ],
 
 );
@@ -196,16 +203,46 @@ sub asn($)
 
     return "LOCAL" if $as eq '0';
 
-    my $cached_as_name = $asn{$as};
-    return $cached_as_name if defined($cached_as_name) && $cached_as_name ne '';
+    my $as_name = $asn{$as};
 
-    my ($as_name) = `whois AS$as | grep as-name` =~ /as\-name:\s+([^\s\n\r]+)/;
+    unless(defined($as_name) && $as_name ne '') {
 
-    $as_name = 'AS'.$as unless defined($as_name) && $as_name ne '';
+	($as_name) = `whois AS$as | grep as-name` =~ /as\-name:\s+([^\s\n\r]+)/;
 
-    $asn{$as} = $as_name;
+	$as_name = 'AS'.$as unless defined($as_name) && $as_name ne '';
+
+	$asn{$as} = $as_name;
+
+    }
 
     return $as_name;
+}
+
+sub as_path($;$)
+{
+    my ($as_path, $dir) = @_;
+
+    return undef unless defined($as_path) && $as_path ne '';
+    return "LOCAL" if $as_path eq '^$';
+
+    my @ases = ($as_path =~ /(\d+)\_?/g);
+    return $as_path unless scalar(@ases) > 0;
+
+    my @as_names = ();
+    my $prev_as;
+
+    foreach my $as (@ases) {
+	# Skip prepends
+	next if(defined($prev_as) && $prev_as == $as);
+	# Resolve AS name
+	push @as_names, asn($as);
+	# Remember processed AS in order to skip prepends
+	$prev_as = $as;
+    }
+
+    return $as_path unless scalar(@as_names) > 0;
+
+    return join(' '.((defined($dir) && $dir ne '') ? $dir.' ':''), @as_names);
 }
 
 ###########################################################################
@@ -250,8 +287,9 @@ sub VERSION_MESSAGE()
     my $release = "";
 
     if(open($fh, $0)) {
-        for(my $i = 0; ($i < 20) && !(defined($ver) && defined($date)); $i++) {
+        for(my $i = 0; ($i < 50) && !(defined($ver) && defined($date)); $i++) {
             my $line = <$fh>;
+
             if($line =~ /version:\s+(\d+\.\d+)/i) {
                 $ver = $1;
             } elsif ($line =~ /date:\s+((?:[a-z]{3}\s+\d{1,2}(?:[a-z]{2})?|\d{1,2}(?:[a-z]{2})?\s+[a-z]{3}|\d{1,2}[\.\s]\d{1,2}\.?)\s+\d{4})/i) {
@@ -433,22 +471,83 @@ my @indexes = defined($sort) ?
 
 		    } keys %records;
 
-# We want record fields to be presented in certain order
-my @order = ();
+my @out_records = ();
+my %field_width = ();
+my $total_width = 0;
 
-# Not all fields exist in every pmacct line,
-# but those that do, must preserve given order
-foreach my $field (@{$CONFIG{'field_order'}}) {
-    # We will filter out non-existant fields
-    # by using the first record in the list,
-    # assumming all records contain the exact
-    # same fields
-    next unless(defined($records{$indexes[0]}{$field}));
-    push @order, $field;
+for(my $n = (defined($lines) && $lines < scalar(@indexes)) ? $lines:scalar(@indexes); $n > 0; $n--) {
+
+    # Get record indexes from the sorted list
+    # in either  ascending or descending order
+    my $index = $reverse ? pop @indexes:shift @indexes;
+    # Get the record itself
+    my $record = $records{$index};
+
+    # Resolve field data, unless -n argument is given
+    unless($OPTS{'n'}) {
+	if(defined($record->{'peer_src_ip'}) && $record->{'peer_src_ip'} ne '') {
+		$record->{'peer_src_ip'} = atoh($record->{'peer_src_ip'});
+	}
+	if(defined($record->{'src_ip'}) && $record->{'src_ip'} ne '') {
+	    $record->{'src_ip'} = atoh($record->{'src_ip'});
+	}
+	if(defined($record->{'dst_ip'}) && $record->{'dst_ip'} ne '') {
+	    $record->{'dst_ip'} = atoh($record->{'dst_ip'});
+	}
+	unless($csv) {
+	    if(defined($record->{'src_as'}) && $record->{'src_as'} ne '') {
+		$record->{'whois'} = sprintf("[ %s ]", asn($record->{'src_as'}));
+	    }
+	    if(defined($record->{'dst_as'}) && $record->{'dst_as'} ne '') {
+		$record->{'whois'} = sprintf("[ %s ]", asn($record->{'dst_as'}));
+	    }
+	    if(defined($record->{'src_as_path'}) && $record->{'src_as_path'} ne '') {
+		$record->{'whois'} = sprintf("[ %s ]", as_path($record->{'src_as_path'}, '<'));
+	    }
+	    if(defined($record->{'as_path'}) && $record->{'as_path'} ne '') {
+		$record->{'whois'} = sprintf("[ %s ]", as_path($record->{'as_path'}, '>'));
+	    }
+	}
+    }
+
+    foreach my $field (keys %{$record}) {
+	# Get field value length
+	my $len = length($record->{$field});
+	# Keep track of maximum width for each field
+	$field_width{$field} = $len unless(defined($field_width{$field}) &&
+					   $field_width{$field} > $len);
+    }
+
+    push @out_records, $record;
+
+    printf("\rAnalyzing data, please wait ... %d record%s", scalar(@out_records), scalar(@out_records) > 1 ? "s":"") unless $csv;
 }
 
-my $num_fields = scalar(@order);
-my $total_width = 0;
+print "\r" unless $csv;
+
+# We want record fields to be shown in certain table column order.
+# Not all fields exist in every pmacct line, but those that do,
+# must preserve defined order.
+my @order = (grep { defined($out_records[0]{$_}) } @{$CONFIG{'field_order'}});
+
+# Prepare format string
+my $row_format = join('',
+		      (map {
+				# Width is either specified per-column
+				# or default is assumed, depending on
+				# whether addresses are numeric or not
+				my $min_width = defined($CONFIG{'field_width'}{$_}) ?
+						    $CONFIG{'field_width'}{$_}:
+						    ($OPTS{'n'} ? 5:10);
+				my $width = (defined($field_width{$_}) &&
+					     $field_width{$_} > $min_width) ?
+						    $field_width{$_}:
+						    $min_width;
+				# Track the total width of the table
+				$total_width += $width+4;
+				# This is our dynamic column format
+				"%-".($width+4).".".$width."s";
+		       } @order));
 
 # Print header ...
 print uc($csv ?
@@ -459,49 +558,15 @@ print uc($csv ?
 	    :
 
 	    # ... or as a formatted table header
-	    sprintf(join('',
-			 (map {
-				    # Width is either specified per-column
-				    # or default is assumed, depending on
-				    # whether addresses are numeric or not
-				    my $width = defined($CONFIG{'field_width'}{$_}) ?
-						    $CONFIG{'field_width'}{$_}:($OPTS{'n'} ? 20:30);
-				    # Track the total width of the table
-				    $total_width += $width+2;
-				    # This is our dynamic column format
-				    "%-".($width+2).".".$width."s";
-			  } @order)
-		    ),
+	    sprintf($row_format,
 		    (map { defined($CONFIG{'field_desc'}{$_}) ? $CONFIG{'field_desc'}{$_}:$_ } @order))
 
-	)."\n".("=" x $total_width)."\n";
+	)."\n";
 
-for(my $n = (defined($lines) && $lines < scalar(@indexes)) ? $lines:scalar(@indexes); $n > 0; $n--) {
+print (("=" x $total_width)."\n") unless $csv;
 
-    # Get record indexes from the sorted list
-    # in either  ascending or descending order
-    my $index = $reverse ? pop @indexes:shift @indexes;
-    # Get the record itself
-    my $record = $records{$index};
-
-    # Resolve IP addresses, unless -n argument is given
-    unless($OPTS{'n'}) {
-	if(defined($record->{'peer_src_ip'}) && $record->{'peer_src_ip'} ne '') {
-	    $record->{'peer_src_ip'} = atoh($record->{'peer_src_ip'});
-	}
-	if(defined($record->{'src_ip'}) && $record->{'src_ip'} ne '') {
-	    $record->{'src_ip'} = atoh($record->{'src_ip'});
-	}
-	if(defined($record->{'dst_ip'}) && $record->{'dst_ip'} ne '') {
-	    $record->{'dst_ip'} = atoh($record->{'dst_ip'});
-	}
-	if(defined($record->{'src_as'}) && $record->{'src_as'} ne '') {
-	    $record->{'src_as'} = sprintf("%-10.10s[ %.20s ]", $record->{'src_as'}, asn($record->{'src_as'}));
-	}
-	if(defined($record->{'dst_as'}) && $record->{'dst_as'} ne '') {
-	    $record->{'dst_as'} = sprintf("%-10.10s[ %.20s ]", $record->{'dst_as'}, asn($record->{'dst_as'}));
-	}
-    }
+# Print records ...
+foreach my $record (@out_records) {
 
     # Print data row ...
     printf(($csv ?
@@ -512,18 +577,7 @@ for(my $n = (defined($lines) && $lines < scalar(@indexes)) ? $lines:scalar(@inde
 	      :
 
 	      # ... or as a formatted table row
-	      sprintf(join('',
-			   (map {
-				    # Width is either specified per-column
-				    # or default is assumed, depending on
-				    # whether addresses are numeric or not
-				    my $width = defined($CONFIG{'field_width'}{$_}) ?
-						    $CONFIG{'field_width'}{$_}:($OPTS{'n'} ? 20:30);
-				    # This is our dynamic column format
-				    "%-".($width+2).".".$width."s";
-			   } @order)
-		      ),
-		      @{$record}{@order})
+	      sprintf($row_format, @{$record}{@order})
 
 	   )."\n");
 
