@@ -249,7 +249,7 @@ sub as_path($;$)
     return undef unless defined($as_path) && $as_path ne '';
     return "LOCAL" if $as_path eq '^$';
 
-    my @ases = split(/\_/, $as_path);
+    my @ases = ($as_path =~ /(\d+)/g);
     return $as_path unless scalar(@ases) > 0;
 
     my @as_names = ();
@@ -348,7 +348,6 @@ getopts('ABPRXrazcnsx:l:', \%OPTS);
 
 my $aggregate = $OPTS{'a'} ? 1:0;
 
-
 my $reverse = $OPTS{'r'} ? 1:0;
 my $resolve = $OPTS{'n'} ? 0:1;
 my $shorten = $OPTS{'s'} ? 1:0;
@@ -418,8 +417,8 @@ my %exporters = ();
 my %records = ();
 my $key = 0;
 
-my $sort_criteria;
 my $sort_numeric = 1;
+my $sort_criteria;
 
 if($OPTS{'A'}) {
     ($sort_criteria) = grep(/(^|\_)as(\_|$)/, @fields);
@@ -432,7 +431,6 @@ if($OPTS{'A'}) {
     $sort_numeric = 0 if $resolve;
 } elsif($OPTS{'X'}) {
     $sort_criteria = 'peer_src_ip';
-    $sort_numeric = 0 if $resolve;
 }
 
 foreach my $row (@rows) {
@@ -503,8 +501,8 @@ my @indexes = defined($sort_criteria) ?
 
 			    # Treat each value as a list of numbers separated by , | _ or blank
 			    # and convert it to an array of numeric values
-			    my @A = split(/[,\|\_\s]/, $A);
-			    my @B = split(/[,\|\_\s]/, $B);
+			    my @A = ($A =~ /(\d+)/g);
+			    my @B = ($B =~ /(\d+)/g);
 
 			    # Use array size comparison as tie breaker
 			    # in case array values couldn't be compared
