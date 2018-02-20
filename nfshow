@@ -18,8 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Version: 0.3
-# Date:    Feb 15th 2018
+# Version: 0.4
+# Date:    Feb 20th 2018
 #
 ###########################################################################
 
@@ -249,7 +249,7 @@ sub as_path($;$)
     return undef unless defined($as_path) && $as_path ne '';
     return "LOCAL" if $as_path eq '^$';
 
-    my @ases = ($as_path =~ /(\d+)\_?/g);
+    my @ases = split(/\_/, $as_path);
     return $as_path unless scalar(@ases) > 0;
 
     my @as_names = ();
@@ -286,8 +286,11 @@ sub usage()
     print "  -a                  aggregate counters (default: per-protocol counters)\n";
     print "  -z                  zero counters (default: keep counters)\n\n";
 
-    print "  -b                  sort by bytes\n";
-    print "  -p                  sort by packets\n";
+    print "  -A                  sort by AS number/path\n";
+    print "  -B                  sort by bytes\n";
+    print "  -P                  sort by packets\n";
+    print "  -R                  sort by protocol\n";
+    print "  -X                  sort by exporter\n";
     print "  -r                  sort in reverse order\n\n";
 
     print "  -l <N>              limit to N rows (default: no limit)\n";
@@ -341,17 +344,10 @@ sub VERSION_MESSAGE()
 
 my %OPTS = ();
 
-getopts('abprzcnsx:l:', \%OPTS);
+getopts('ABPRXrazcnsx:l:', \%OPTS);
 
 my $aggregate = $OPTS{'a'} ? 1:0;
 
-my $sort;
-
-if($OPTS{'p'}) {
-    $sort = 'packets';
-} elsif($OPTS{'b'}) {
-    $sort = 'bytes';
-}
 
 my $reverse = $OPTS{'r'} ? 1:0;
 my $resolve = $OPTS{'n'} ? 0:1;
@@ -377,6 +373,7 @@ if(defined($OPTS{'x'}) && $OPTS{'x'} ne '') {
     $exporter = lc($address);
 
     print "Showing only exports from ".atoh($exporter)."\n\n";
+
 }
 
 my $stat_type = shift @ARGV;
@@ -421,6 +418,23 @@ my %exporters = ();
 my %records = ();
 my $key = 0;
 
+my $sort_criteria;
+my $sort_numeric = 1;
+
+if($OPTS{'A'}) {
+    ($sort_criteria) = grep(/(^|\_)as(\_|$)/, @fields);
+} elsif($OPTS{'B'}) {
+    $sort_criteria = 'bytes';
+} elsif($OPTS{'P'}) {
+    $sort_criteria = 'packets';
+} elsif($OPTS{'R'}) {
+    $sort_criteria = 'protocol';
+    $sort_numeric = 0 if $resolve;
+} elsif($OPTS{'X'}) {
+    $sort_criteria = 'peer_src_ip';
+    $sort_numeric = 0 if $resolve;
+}
+
 foreach my $row (@rows) {
     # Get rid of trailing newline
     chop($row);
@@ -440,7 +454,6 @@ foreach my $row (@rows) {
     # in case pmacct command didn't filter out
     # other exporters
     next if(defined($exporter) && $exporter !~ /^$record{'peer_src_ip'}$/i);
-
 
     # Which data fields identify aggregated records as unique ?
     my $unique_key_fields =  $CONFIG{'stats'}{$stat_type}{'key'};
@@ -479,13 +492,42 @@ unless(scalar(keys %records)) {
     exit(0);
 }
 
-# Sort record indexes either by packets, bytes or order in which they were collected
-my @indexes = defined($sort) ?
+# Sort record indexes 
+my @indexes = defined($sort_criteria) ?
 		    sort {
-			    my $A = $records{$a}{$sort};
-			    my $B = $records{$b}{$sort};
+			    my $A = $records{$a}{$sort_criteria};
+			    my $B = $records{$b}{$sort_criteria};
 
-			    return (is_num($A) && is_num($B)) ? ($A <=> $B):($A cmp $B);
+			    # Do string comparison unless numeric sort is requested
+			    return $A cmp $B unless $sort_numeric;
+
+			    # Treat each value as a list of numbers separated by , | _ or blank
+			    # and convert it to an array of numeric values
+			    my @A = split(/[,\|\_\s]/, $A);
+			    my @B = split(/[,\|\_\s]/, $B);
+
+			    # Use array size comparison as tie breaker
+			    # in case array values couldn't be compared
+			    # for whatever reason,
+			    my $cmp_size = $reverse ?
+						(scalar(@B) <=> scalar(@A)):
+						(scalar(@A) <=> scalar(@B));
+
+			    my $cmp_val;
+
+			    while(!$cmp_val) {
+
+				my $a_val = shift @A;
+				last unless defined($a_val);
+
+				my $b_val = shift @B;
+				last unless defined($b_val);
+
+				$cmp_val = $a_val <=> $b_val;
+
+			    }
+
+			    return defined($cmp_val) ? $cmp_val:$cmp_size;
 
 		    } keys %records
 
