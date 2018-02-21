@@ -215,7 +215,7 @@ sub shorten($)
 
     }
 
-    return sprintf("%02.2f%s", $value, $unit);
+    return sprintf($unit ne '' ? "%02.2f%s":"%d", $value, $unit);
 }
 
 sub asn($)
@@ -428,7 +428,7 @@ if($OPTS{'A'}) {
     $sort_criteria = 'packets';
 } elsif($OPTS{'R'}) {
     $sort_criteria = 'protocol';
-    $sort_numeric = 0 if $resolve;
+#    $sort_numeric = 0 if $resolve;
 } elsif($OPTS{'X'}) {
     $sort_criteria = 'peer_src_ip';
 }
