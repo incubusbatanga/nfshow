@@ -18,8 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Version: 0.4
-# Date:    Feb 20th 2018
+# Version: 0.5
+# Date:    Feb 22nd 2018
 #
 ###########################################################################
 
@@ -296,6 +296,7 @@ sub usage()
     print "  -l <N>              limit to N rows (default: no limit)\n";
     print "  -n                  display numeric (default: resolve data)\n";
     print "  -s                  use short units (default: long units)\n";
+    print "  -e                  exclude filter regex (default: none)\n";
     print "  -c                  output in CSV format (default: table format)\n\n";
 
     print "Statistics types:\n\n";
@@ -344,14 +345,21 @@ sub VERSION_MESSAGE()
 
 my %OPTS = ();
 
-getopts('ABPRXrazcnsx:l:', \%OPTS);
+getopts('ABPRXrazcnse:x:l:', \%OPTS);
 
 my $aggregate = $OPTS{'a'} ? 1:0;
-
 my $reverse = $OPTS{'r'} ? 1:0;
 my $resolve = $OPTS{'n'} ? 0:1;
 my $shorten = $OPTS{'s'} ? 1:0;
 my $csv = $OPTS{'c'} ? 1:0;
+
+my $exclude_regex;
+
+if(defined($OPTS{'e'}) && $OPTS{'e'} ne '') {
+    $exclude_regex = $OPTS{'e'};
+    # Strip / ... / if defined
+    $exclude_regex =~ s/^\/|\/$//g;
+}
 
 my $lines;
 
@@ -441,6 +449,10 @@ foreach my $row (@rows) {
     # Skip rows that dont have packets, bytes
     # and at least one metric field
     next unless scalar(@values) > 2;
+
+    if(defined($exclude_regex) && $exclude_regex ne '') {
+	next if scalar(grep(/$exclude_regex/, @values)) > 0;
+    }
 
     my %record = ();
 
