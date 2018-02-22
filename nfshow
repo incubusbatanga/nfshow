@@ -293,10 +293,10 @@ sub usage()
     print "  -X                  sort by exporter\n";
     print "  -r                  sort in reverse order\n\n";
 
+    print "  -e <regex>          exclude filter (default: no filter)\n";
     print "  -l <N>              limit to N rows (default: no limit)\n";
     print "  -n                  display numeric (default: resolve data)\n";
     print "  -s                  use short units (default: long units)\n";
-    print "  -e                  exclude filter regex (default: none)\n";
     print "  -c                  output in CSV format (default: table format)\n\n";
 
     print "Statistics types:\n\n";
