@@ -358,7 +358,8 @@ my $exclude_regex;
 if(defined($OPTS{'e'}) && $OPTS{'e'} ne '') {
     $exclude_regex = $OPTS{'e'};
     # Strip / ... / if defined
-    $exclude_regex =~ s/^\/|\/$//g;
+    $exclude_regex =~ s/^((?<!\\)\/)(?=.*?(?<!\\)\1$)//g;
+    $exclude_regex =~ s/(?<!\\)\/$//g if $1;
 }
 
 my $lines;
